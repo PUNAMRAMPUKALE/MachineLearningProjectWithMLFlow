@@ -156,9 +156,9 @@ export MLFLOw_PASSWORD=Punam@123
 
     AWS_SECRET_ACCESS_KEY=
 
-    AWS_REGION = us-east-1
+    AWS_REGION = us-east-2
 
-    AWS_ECR_LOGIN_URI = us-east-2
+    AWS_ECR_LOGIN_URI =
 
     ECR_REPOSITORY_NAME = mlproject
 

@@ -14,6 +14,21 @@ concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: true
 
+# ------------------------------------------------------------
+# REQUIRED SECRETS (already in your repo):
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+#   AWS_REGION               -> e.g., us-east-2
+#   AWS_ECR_LOGIN_URI        -> e.g., 536453886414.dkr.ecr.us-east-2.amazonaws.com
+#   ECR_REPOSITORY_NAME      -> e.g., mlproject
+# ------------------------------------------------------------
+
+env:
+  AWS_REGION:        ${{ secrets.AWS_REGION }}
+  ECR_REGISTRY:      ${{ secrets.AWS_ECR_LOGIN_URI }}
+  ECR_REPOSITORY:    ${{ secrets.ECR_REPOSITORY_NAME }}
+  IMAGE_URI:         ${{ secrets.AWS_ECR_LOGIN_URI }}/${{ secrets.ECR_REPOSITORY_NAME }}
+
 jobs:
   integration:
     name: Continuous Integration
@@ -29,14 +44,9 @@ jobs:
         run: echo "Running unit tests"
 
   build-and-push-ecr-image:
-    name: Continuous Delivery
+    name: Build & Push (ECR)
     needs: integration
     runs-on: ubuntu-latest
-    env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
-      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_NAME }}
-      # e.g. 536453886414.dkr.ecr.us-east-2.amazonaws.com
-      ECR_REGISTRY: ${{ secrets.AWS_ECR_LOGIN_URI }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -53,7 +63,9 @@ jobs:
         run: |
           set -e
           aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" --region "$AWS_REGION" >/dev/null 2>&1 || \
-          aws ecr create-repository --repository-name "$ECR_REPOSITORY" --image-scanning-configuration scanOnPush=true --region "$AWS_REGION" >/dev/null
+          aws ecr create-repository --repository-name "$ECR_REPOSITORY" \
+            --image-scanning-configuration scanOnPush=true --region "$AWS_REGION" >/dev/null
+          echo "Using repo: $IMAGE_URI"
 
       - name: Login to Amazon ECR (non-interactive)
         run: |
@@ -61,25 +73,24 @@ jobs:
           | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
       - name: Build, tag, and push image to Amazon ECR
-        id: build-image
-        env:
-          IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
         run: |
           set -e
           docker build -t "$IMAGE_URI:latest" .
           docker tag "$IMAGE_URI:latest" "$IMAGE_URI:${GITHUB_SHA}"
           docker push "$IMAGE_URI:latest"
           docker push "$IMAGE_URI:${GITHUB_SHA}"
-          echo "image=$IMAGE_URI:latest" >> "$GITHUB_OUTPUT"
+          echo "Pushed: $IMAGE_URI:latest and :${GITHUB_SHA}"
+
+      - name: Show repo tags (post-push)
+        run: |
+          aws ecr describe-images --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" \
+            --query "imageDetails[].imageTags[]" --output text | tr '\t' '\n' || true
 
   Continuous-Deployment:
     name: Continuous-Deployment
     needs: build-and-push-ecr-image
     runs-on: self-hosted
     env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
-      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_NAME }}
-      ECR_REGISTRY: ${{ secrets.AWS_ECR_LOGIN_URI }}
       CONTAINER_NAME: mlproj
       HOST_PORT: 8080
       CONTAINER_PORT: 8080
@@ -108,13 +119,43 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # Ensure repo also exists here to avoid 'not found' on first pull
+      - name: Ensure ECR repository exists (idempotent)
+        shell: bash
+        run: |
+          set -e
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" --region "$AWS_REGION" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "$ECR_REPOSITORY" \
+            --image-scanning-configuration scanOnPush=true --region "$AWS_REGION" >/dev/null
+
       - name: Login to Amazon ECR (non-interactive)
         run: |
           aws ecr get-login-password --region "$AWS_REGION" \
           | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-      - name: Pull latest image
-        run: docker pull "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+      # Print what tags are present so we can diagnose easily
+      - name: Verify available tags
+        shell: bash
+        run: |
+          set -e
+          echo "Repo: $IMAGE_URI"
+          aws ecr describe-images --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" \
+            --query "imageDetails[].imageTags[]" --output text | tr '\t' '\n' || true
+
+      # Prefer immutable SHA; fallback to latest if necessary
+      - name: Pull image (prefer commit SHA)
+        shell: bash
+        run: |
+          set -e
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" \
+               --image-ids imageTag="${GITHUB_SHA}" >/dev/null 2>&1; then
+            PULL_TAG="${GITHUB_SHA}"
+          else
+            PULL_TAG="latest"
+          fi
+          echo "Using tag: $PULL_TAG"
+          docker pull "$IMAGE_URI:$PULL_TAG"
+          echo "PULL_TAG=$PULL_TAG" >> "$GITHUB_ENV"
 
       - name: Stop and remove old container if running
         shell: bash
@@ -131,7 +172,7 @@ jobs:
             -e AWS_ACCESS_KEY_ID='${{ secrets.AWS_ACCESS_KEY_ID }}' \
             -e AWS_SECRET_ACCESS_KEY='${{ secrets.AWS_SECRET_ACCESS_KEY }}' \
             -e AWS_REGION='${{ secrets.AWS_REGION }}' \
-            "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+            "$IMAGE_URI:${PULL_TAG}"
 
       - name: Cleanup old images
         run: docker system prune -f --volumes

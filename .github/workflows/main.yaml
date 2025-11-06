@@ -66,14 +66,10 @@ jobs:
           IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
         run: |
           set -e
-          # Build
           docker build -t "$IMAGE_URI:latest" .
-          # Traceable commit tag
           docker tag "$IMAGE_URI:latest" "$IMAGE_URI:${GITHUB_SHA}"
-          # Push
           docker push "$IMAGE_URI:latest"
           docker push "$IMAGE_URI:${GITHUB_SHA}"
-          # Output (modern way)
           echo "image=$IMAGE_URI:latest" >> "$GITHUB_OUTPUT"
 
   Continuous-Deployment:
@@ -88,9 +84,22 @@ jobs:
       HOST_PORT: 8080
       CONTAINER_PORT: 8080
     steps:
-      # Install AWS CLI on the self-hosted runner (fixes 'aws: command not found')
-      - name: Install AWS CLI
-        uses: aws-actions/setup-aws-cli@v2
+      # Install AWS CLI v2 manually on the self-hosted runner if missing
+      - name: Ensure AWS CLI is installed
+        shell: bash
+        run: |
+          set -e
+          if ! command -v aws >/dev/null 2>&1; then
+            echo "AWS CLI not found. Installing..."
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -y
+              sudo apt-get install -y unzip curl
+            fi
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+            unzip -q awscliv2.zip
+            sudo ./aws/install --update
+          fi
+          aws --version
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -105,10 +114,10 @@ jobs:
           | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
       - name: Pull latest image
-        run: |
-          docker pull "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+        run: docker pull "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
       - name: Stop and remove old container if running
+        shell: bash
         run: |
           if docker ps -a --format '{{.Names}}' | grep -Eq "^${CONTAINER_NAME}\$"; then
             docker rm -f "$CONTAINER_NAME"

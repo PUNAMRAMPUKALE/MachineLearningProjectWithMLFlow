@@ -10,6 +10,10 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   integration:
     name: Continuous Integration
@@ -31,7 +35,8 @@ jobs:
     env:
       AWS_REGION: ${{ secrets.AWS_REGION }}
       ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_NAME }}
-      ECR_REGISTRY: ${{ secrets.AWS_ECR_LOGIN_URI }} # e.g. 536453886414.dkr.ecr.us-east-2.amazonaws.com
+      # e.g. 536453886414.dkr.ecr.us-east-2.amazonaws.com
+      ECR_REGISTRY: ${{ secrets.AWS_ECR_LOGIN_URI }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -50,7 +55,7 @@ jobs:
           aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" --region "$AWS_REGION" >/dev/null 2>&1 || \
           aws ecr create-repository --repository-name "$ECR_REPOSITORY" --image-scanning-configuration scanOnPush=true --region "$AWS_REGION" >/dev/null
 
-      - name: Login to Amazon ECR (no masking warning)
+      - name: Login to Amazon ECR (non-interactive)
         run: |
           aws ecr get-login-password --region "$AWS_REGION" \
           | docker login --username AWS --password-stdin "$ECR_REGISTRY"
@@ -61,14 +66,14 @@ jobs:
           IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
         run: |
           set -e
-          # build
+          # Build
           docker build -t "$IMAGE_URI:latest" .
-          # second tag for traceability
+          # Traceable commit tag
           docker tag "$IMAGE_URI:latest" "$IMAGE_URI:${GITHUB_SHA}"
-          # push
+          # Push
           docker push "$IMAGE_URI:latest"
           docker push "$IMAGE_URI:${GITHUB_SHA}"
-          # output (new way)
+          # Output (modern way)
           echo "image=$IMAGE_URI:latest" >> "$GITHUB_OUTPUT"
 
   Continuous-Deployment:
@@ -83,6 +88,10 @@ jobs:
       HOST_PORT: 8080
       CONTAINER_PORT: 8080
     steps:
+      # Install AWS CLI on the self-hosted runner (fixes 'aws: command not found')
+      - name: Install AWS CLI
+        uses: aws-actions/setup-aws-cli@v2
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -90,7 +99,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to Amazon ECR
+      - name: Login to Amazon ECR (non-interactive)
         run: |
           aws ecr get-login-password --region "$AWS_REGION" \
           | docker login --username AWS --password-stdin "$ECR_REGISTRY"
@@ -110,9 +119,9 @@ jobs:
           docker run -d --name "$CONTAINER_NAME" \
             -p ${HOST_PORT}:${CONTAINER_PORT} \
             --restart unless-stopped \
-            --env AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
-            --env AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
-            --env AWS_REGION=${{ secrets.AWS_REGION }} \
+            -e AWS_ACCESS_KEY_ID='${{ secrets.AWS_ACCESS_KEY_ID }}' \
+            -e AWS_SECRET_ACCESS_KEY='${{ secrets.AWS_SECRET_ACCESS_KEY }}' \
+            -e AWS_REGION='${{ secrets.AWS_REGION }}' \
             "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
       - name: Cleanup old images

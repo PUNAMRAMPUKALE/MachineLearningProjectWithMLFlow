@@ -1,10 +1,15 @@
+# app.py (top of file)
+import os, sys
+
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.join(ROOT_DIR, "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+
 from flask import Flask, render_template, request
-import os 
 import numpy as np
 import pandas as pd
 from mlProject.pipeline.prediction import PredictionPipeline
-import os, sys
-sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
 
 app = Flask(__name__) # initializing a flask app

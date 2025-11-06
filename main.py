@@ -1,12 +1,9 @@
-import sys, os
-sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from mlProject import logger
 from mlProject.pipeline.stage_01_data_ingestion import DataIngestionTrainingPipeline
 from mlProject.pipeline.stage_02_data_validation import DataValidationTrainingPipeline
 from mlProject.pipeline.stage_03_data_transformation import DataTransformationTrainingPipeline
 from mlProject.pipeline.stage_04_model_trainer import ModelTrainerTrainingPipeline
 from mlProject.pipeline.stage_05_model_evaluation import ModelEvaluationTrainingPipeline
-
 
 
 STAGE_NAME = "Data Ingestion stage"

@@ -1,8 +1,10 @@
 # app.py
 import os, sys
+from pathlib import Path
 from flask import Flask, render_template, request
 import numpy as np
-import pandas as pd  # if unused you can remove later
+# pandas import optional — uncomment if you actually use it
+# import pandas as pd
 from mlProject.pipeline.prediction import PredictionPipeline
 
 # Ensure "src" is importable
@@ -25,6 +27,7 @@ def homePage():
 @app.route("/train", methods=["GET"])
 def training():
     """Trigger training pipeline (simple shell call)."""
+    # NOTE: this assumes main.py exists at /app/main.py inside the image
     os.system("python main.py")
     return "Training Successful!"
 
@@ -76,7 +79,12 @@ def predict():
     except Exception as e:
         app.logger.exception("Prediction failed")
         # Show the error on the result page so you can see what's wrong in prod
-        return render_template("result.html", prediction=f"Error: {e}")
+        return render_template("result.html", prediction=f"Error: {e}"), 500
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return {"status": "ok"}, 200
 
 
 # ---- Entrypoint -------------------------------------------------------------

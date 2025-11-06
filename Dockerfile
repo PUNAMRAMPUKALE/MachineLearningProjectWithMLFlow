@@ -1,7 +1,7 @@
-# ✅ Use Python 3.11 (needed for pandas 2.2.3+)
+# ✅ Use Python 3.11 (works with pandas 2.2.x etc.)
 FROM python:3.11-slim
 
-# Install minimal system dependencies
+# Install minimal system dependencies (e.g., for numpy/scikit-learn)
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends libgomp1 && \
     rm -rf /var/lib/apt/lists/*
@@ -9,18 +9,18 @@ RUN apt-get update -y && \
 # Set working directory
 WORKDIR /app
 
-# Copy and install dependencies
-COPY requirements.txt .
+# Copy and install dependencies first (better layer caching)
+COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all project files
-COPY . .
+# Copy the rest of the project
+COPY . /app
 
-# Ensure Flask can import from src/
+# Make sure Flask can import from src/
 ENV PYTHONPATH="/app/src"
 
 # Expose Flask port
 EXPOSE 8080
 
-# Run the Flask app (can switch to gunicorn later if needed)
+# Run the Flask app
 CMD ["python", "app.py"]

@@ -14,15 +14,9 @@ concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: true
 
-# ------------------------------------------------------------
-# REQUIRED SECRETS (already in your repo):
-#   AWS_ACCESS_KEY_ID
-#   AWS_SECRET_ACCESS_KEY
-#   AWS_REGION               -> e.g., us-east-2
-#   AWS_ECR_LOGIN_URI        -> e.g., 536453886414.dkr.ecr.us-east-2.amazonaws.com
-#   ECR_REPOSITORY_NAME      -> e.g., mlproject
-# ------------------------------------------------------------
-
+# ------------------------------------------------------------------
+# Global (non-sensitive) environment
+# ------------------------------------------------------------------
 env:
   AWS_REGION:        ${{ secrets.AWS_REGION }}
   ECR_REGISTRY:      ${{ secrets.AWS_ECR_LOGIN_URI }}
@@ -90,12 +84,52 @@ jobs:
     name: Continuous-Deployment
     needs: build-and-push-ecr-image
     runs-on: self-hosted
+
+    # Backend container ports (adjust if your server listens on a different port)
     env:
-      CONTAINER_NAME: mlproj
-      HOST_PORT: 8080
-      CONTAINER_PORT: 8080
+      CONTAINER_NAME: backend-api
+      HOST_PORT: 4000
+      CONTAINER_PORT: 4000
+
     steps:
-      # Install AWS CLI v2 manually on the self-hosted runner if missing
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Node + pnpm on self-hosted (needed to run prisma CLI here)
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Enable corepack
+        run: corepack enable
+
+      # Install dependencies from local lockfile
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Check DATABASE_URL is present (masked)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "DATABASE_URL is empty – add it as a GitHub Secret."
+            exit 1
+          else
+            echo "DATABASE_URL present (length: ${#DATABASE_URL})"
+          fi
+
+      - name: Prisma generate
+        run: pnpm prisma:generate
+
+      # Run migrations INSIDE your VPC/on the self-hosted runner so it can reach RDS
+      - name: Prisma migrate deploy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: pnpm db:migrate:deploy
+
+      # AWS CLI on self-hosted (install if missing)
       - name: Ensure AWS CLI is installed
         shell: bash
         run: |
@@ -119,7 +153,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Ensure repo also exists here to avoid 'not found' on first pull
       - name: Ensure ECR repository exists (idempotent)
         shell: bash
         run: |
@@ -133,29 +166,21 @@ jobs:
           aws ecr get-login-password --region "$AWS_REGION" \
           | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-      # Print what tags are present so we can diagnose easily
-      - name: Verify available tags
-        shell: bash
-        run: |
-          set -e
-          echo "Repo: $IMAGE_URI"
-          aws ecr describe-images --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" \
-            --query "imageDetails[].imageTags[]" --output text | tr '\t' '\n' || true
-
-      # Prefer immutable SHA; fallback to latest if necessary
-      - name: Pull image (prefer commit SHA)
+      - name: Determine tag to pull
+        id: tag
         shell: bash
         run: |
           set -e
           if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" \
                --image-ids imageTag="${GITHUB_SHA}" >/dev/null 2>&1; then
-            PULL_TAG="${GITHUB_SHA}"
+            echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           else
-            PULL_TAG="latest"
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
           fi
-          echo "Using tag: $PULL_TAG"
-          docker pull "$IMAGE_URI:$PULL_TAG"
-          echo "PULL_TAG=$PULL_TAG" >> "$GITHUB_ENV"
+          echo "Will use tag: $(cat $GITHUB_OUTPUT | cut -d= -f2)"
+
+      - name: Pull image
+        run: docker pull "$IMAGE_URI:${{ steps.tag.outputs.tag }}"
 
       - name: Stop and remove old container if running
         shell: bash
@@ -164,15 +189,15 @@ jobs:
             docker rm -f "$CONTAINER_NAME"
           fi
 
-      - name: Run container
+      - name: Run container (inject runtime env)
         run: |
           docker run -d --name "$CONTAINER_NAME" \
             -p ${HOST_PORT}:${CONTAINER_PORT} \
             --restart unless-stopped \
-            -e AWS_ACCESS_KEY_ID='${{ secrets.AWS_ACCESS_KEY_ID }}' \
-            -e AWS_SECRET_ACCESS_KEY='${{ secrets.AWS_SECRET_ACCESS_KEY }}' \
-            -e AWS_REGION='${{ secrets.AWS_REGION }}' \
-            "$IMAGE_URI:${PULL_TAG}"
+            -e PORT='4000' \
+            -e DATABASE_URL='${{ secrets.DATABASE_URL }}' \
+            -e METRICS_SERVICE_URL='${{ secrets.METRICS_SERVICE_URL }}' \
+            "$IMAGE_URI:${{ steps.tag.outputs.tag }}"
 
       - name: Cleanup old images
         run: docker system prune -f --volumes
